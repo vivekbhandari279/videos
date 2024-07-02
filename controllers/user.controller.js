@@ -7,9 +7,15 @@ import {
   requiredCheck,
 } from "../utils/validation.js";
 import { User } from "../models/user.model.js";
-import { deleteFileFromCloudinary, uploadOnCloudinary } from "../utils/fileUploader.js";
+import {
+  deleteFileFromCloudinary,
+  uploadOnCloudinary,
+} from "../utils/fileUploader.js";
 import jwt from "jsonwebtoken";
 import axios from "axios";
+import { Subscription } from "../models/subscription.model.js";
+import mongoose from "mongoose";
+import { Video } from "../models/video.model.js";
 
 const registerUser = asyncHandler(async (req, res) => {
   /**
@@ -488,9 +494,281 @@ const updateCoverImage = asyncHandler(async (req, res) => {
     .json(new ApiResponse(200, user, "Cover image updated succesfully"));
 });
 
+const getUserChannelProfile = asyncHandler(async (req, res) => {
+  const { username } = req.query;
+
+  if (!username) {
+    throw new ApiError(422, "Username is missing");
+  }
+
+  const profile = await User.aggregate([
+    {
+      $match: {
+        username: username.toLowerCase(),
+      },
+    },
+    {
+      $lookup: {
+        from: "Subscription",
+        localField: "_id",
+        foreignField: "channel",
+        as: "subscribers",
+      },
+    },
+    {
+      $lookup: {
+        from: "subscribers",
+        localField: "_id",
+        foreignField: "subscriber",
+        as: "subscribedTo",
+      },
+    },
+    {
+      $addFields: {
+        subscriberCount: {
+          $size: "$subscribers",
+        },
+        channelSubscribedToCount: {
+          $size: "$subscribedTo",
+        },
+        isSubscribed: {
+          $cond: {
+            if: { $in: [req.user?._id, $subscribers.subscriber] },
+            then: true,
+            else: false,
+          },
+        },
+      },
+    },
+    {
+      $project: {
+        coverImage: 1,
+        avatar: 1,
+        firstName: 1,
+        middleName: 1,
+        lastName: 1,
+        email: 1,
+        phoneCode: 1,
+        phone: 1,
+        subscriberCount: 1,
+        channelSubscribedToCount: 1,
+        isSubscribed: 1,
+      },
+    },
+  ]);
+
+  if (!profile) {
+    throw new ApiError(400, "User not found");
+  }
+
+  return res
+    .status(200)
+    .json(
+      new ApiResponse(200, profile[0], "User profile fetched successfully")
+    );
+});
+
+const doSubscribe = asyncHandler(async (req, res) => {
+  try {
+    const { subscribeTo } = req.body;
+    if (!subscribeTo) {
+      throw new ApiError(400, "Channel details are missing");
+    }
+    const channelToSubscribe = await User.findOne({ userName: subscribeTo });
+    const isAlreadySubscribed = await Subscription.findOne({
+      subscriber: req.user._id,
+      channel: channelToSubscribe._id,
+    });
+
+    if (isAlreadySubscribed) {
+      throw new ApiError(422, "Channel already subscribed");
+    }
+
+    const result = await Subscription.create({
+      subscriber: req.user._id,
+      channel: channelToSubscribe._id,
+    });
+
+    if (!result) {
+      throw new ApiError(
+        500,
+        "Somthing went wrong while saving subscriber data"
+      );
+    }
+
+    res
+      .status(200)
+      .json(new ApiResponse(200, {}, "Channel subscribed successfully"));
+  } catch (error) {
+    throw new ApiError(
+      error.statusCode || 500,
+      error.message || "Somthing went wrong while subscriber channel"
+    );
+  }
+});
+
+const doUnsubscribe = asyncHandler(async (req, res) => {
+  try {
+    const { unsubscribeTo } = req.body;
+    if (!unsubscribeTo) {
+      throw new ApiError(400, "Channel details are missing");
+    }
+    const channelToUnsubscribe = await User.findOne({
+      userName: unsubscribeTo,
+    });
+    const isAlreadySubscribed = await Subscription.findOne({
+      subscriber: req.user._id,
+      channel: channelToUnsubscribe._id,
+    });
+
+    if (!isAlreadySubscribed) {
+      throw new ApiError(422, "Channel subscribtion not found");
+    }
+
+    const result = await Subscription.deleteOne({
+      subscriber: req.user._id,
+      channel: channelToUnsubscribe._id,
+    });
+
+    if (!result) {
+      throw new ApiError(
+        500,
+        "Somthing went wrong while deleting subscriber data"
+      );
+    }
+
+    res
+      .status(200)
+      .json(new ApiResponse(200, {}, "Channel unsubscribed successfully"));
+  } catch (error) {
+    throw new ApiError(
+      error.statusCode || 500,
+      error.message || "Somthing went wrong while unsubscriber channel"
+    );
+  }
+});
+
+const addVideo = asyncHandler(async (req, res) => {
+  try {
+    const { title, description } = req.body;
+    requiredCheck([title, description]);
+
+    // Check for thumbnail image
+    const thumbnailLocalPath = req.files?.thumbnail[0]?.path;
+    if (!thumbnailLocalPath) {
+      throw new ApiError(422, "Thumbnail image is required");
+    }
+
+    // Check for video
+    const videoLocalPath = req.files?.videoFile[0]?.path;
+    if (!videoLocalPath) {
+      throw new ApiError(422, "Video file is required");
+    }
+
+    const thumbnailResult = await uploadOnCloudinary(thumbnailLocalPath);
+    if (!thumbnailResult.url) {
+      throw new ApiError(
+        500,
+        "Somthing went wrong while uploading thumbnail on server"
+      );
+    }
+    const videoResult = await uploadOnCloudinary(videoLocalPath);
+
+    if (!videoResult.url) {
+      throw new ApiError(
+        500,
+        "Somthing went wrong while uploading video on server"
+      );
+    }
+
+    const videoData = await Video.create({
+      title,
+      thumbnail: thumbnailResult.url,
+      videoFile: videoResult.url,
+      owner: req.user._id,
+      description,
+      duration: videoResult.video.dar,
+    });
+
+    return res
+      .status(200)
+      .json(new ApiResponse(200, {}, "Video uploaded successfully"));
+  } catch (error) {
+    throw new ApiError(
+      error.statusCode||500,
+      error.message||"Somthing went wrong while adding video"
+    );
+  }
+});
+
+const getWatchHistory = asyncHandler(async (req, res) => {
+  try {
+    const user = await User.aggregate([
+      {
+        $match: {
+          _id: new mongoose.Types.ObjectId(req.user._id),
+        },
+      },
+      {
+        $lookup: {
+          from: "videos",
+          localField: "watchHistory",
+          foreignField: "_id",
+          as: "watchHistory",
+          pipeline: [
+            {
+              $lookup: {
+                from: "usres",
+                localField: "owner",
+                foreignField: "_id",
+                as: "owner",
+                pipeline: [
+                  {
+                    $project: {
+                      uhid: 1,
+                      firstName: 1,
+                      middelName: 1,
+                      lastName: 1,
+                    },
+                  },
+                ],
+              },
+            },
+            {
+              $addFields: {
+                owner: {
+                  $first: "$owner",
+                },
+              },
+            },
+          ],
+        },
+      },
+    ]);
+
+    if (!user) {
+      throw new ApiError(200, "User not found");
+    }
+
+    return (
+      res.status(200),
+      json(
+        new ApiResponse(
+          200,
+          user[0].watchHistory,
+          "User watch history fetched successfully"
+        )
+      )
+    );
+  } catch (error) {
+    throw new ApiError(
+      error.statusCode || 500,
+      error.message || "Somthing went wrong while fetching watch history"
+    );
+  }
+});
+
 const testFunction = asyncHandler(async (req, res) => {});
-
-
 
 export {
   testFunction,
@@ -503,4 +781,9 @@ export {
   updateUser,
   updateAvatar,
   updateCoverImage,
+  getUserChannelProfile,
+  doSubscribe,
+  doUnsubscribe,
+  getWatchHistory,
+  addVideo,
 };

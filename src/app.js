@@ -25,7 +25,7 @@ app.use(express.static("public")); // to serve local static files.
 app.use(cookieParser()); // To read some secure cookies, which is access by server only.
 
 app.get("/", (req, res) => {
-  res.send("<h1>Dentganga product api Page</h1>");
+  res.send(`<h1>Dentganga product api Page on port: ${process.env.PORT}</h1>`);
 });
 
 // Routes import

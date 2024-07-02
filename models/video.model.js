@@ -28,11 +28,12 @@ const videoSchema = new mongoose.Schema({
         required: [true, "Description is required"],
     },
     duration: {
-        type: Number,
-        required: [true, "Duration us required"]
+        type: String,
+        default: "00:00",
     },
     views: {
         type: Number,
+        default: 0,
     },
     isPublished: {
         type: Boolean,
